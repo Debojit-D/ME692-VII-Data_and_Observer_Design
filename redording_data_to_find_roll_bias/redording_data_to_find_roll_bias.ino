@@ -13,10 +13,14 @@
 
   Output:
     - Serial Plotter: prints roll_gyro_deg (same as before)
-    - CSV file: /roll_log.csv in SPIFFS
+    - CSV file: /roll1.csv in SPIFFS
 
   Serial commands (optional):
     - Send 'd' to dump the CSV file to Serial Monitor
+
+  IMPORTANT FIX:
+    dt is now computed ONLY when a gyro sample is available/read.
+    This makes dt_s correspond to the true time between successive gyro samples.
 */
 
 #include <Arduino_LSM9DS1.h>
@@ -28,21 +32,12 @@
 // -----------------------------
 // User settings
 // -----------------------------
-
-// If STOP_TIME_S == 0: log forever
-// If STOP_TIME_S > 0: stop after STOP_TIME_S seconds
-static const float STOP_TIME_S = 60.0f;
-
-// CSV file path in SPIFFS
-static const char *CSV_PATH = "/roll1.csv";
-
-// How often to flush data to flash (reduce write stress)
-// (e.g., flush every 50 lines)
+static const float STOP_TIME_S = 60.0f;          // 0 -> log forever
+static const char *CSV_PATH = "/rollbiased0.csv";
 static const uint32_t FLUSH_EVERY_N_LINES = 50;
 
 // -----------------------------
-// Choose which gyro axis corresponds to "roll rate"
-// Most common: roll about X axis -> use gx
+// Choose gyro axis for roll-rate
 // -----------------------------
 enum RollAxis { GX_AXIS, GY_AXIS, GZ_AXIS };
 static const RollAxis ROLL_AXIS = GX_AXIS;
@@ -53,7 +48,7 @@ static const RollAxis ROLL_AXIS = GX_AXIS;
 float roll_gyro_deg = 0.0f;
 
 // Time bookkeeping
-unsigned long t_prev_us = 0;
+unsigned long t_prev_us = 0;     // last gyro-sample timestamp (us)
 unsigned long t_start_ms = 0;
 
 // File handle for CSV
@@ -93,14 +88,12 @@ void setup() {
   // -----------------------------
   // Initialize SPIFFS (flash FS)
   // -----------------------------
-  // 'true' means: format if mount fails (useful first time)
   if (!SPIFFS.begin(true)) {
     Serial.println("ERROR: SPIFFS mount failed!");
     while (1) { delay(100); }
   }
 
-  // OPTIONAL: overwrite existing file each run
-  // If you want to append across runs, comment out the remove().
+  // Overwrite existing file each run
   if (SPIFFS.exists(CSV_PATH)) {
     SPIFFS.remove(CSV_PATH);
   }
@@ -112,7 +105,7 @@ void setup() {
     while (1) { delay(100); }
   }
 
-  // Write CSV header
+  // CSV header
   csvFile.println("time_s,dt_s,gx_deg_s,gy_deg_s,gz_deg_s,omega_roll_deg_s,roll_gyro_deg");
   csvFile.flush();
 
@@ -125,7 +118,7 @@ void setup() {
   }
 
   // Initialize time
-  t_prev_us = micros();
+  t_prev_us = micros();   // this will be updated on first gyro sample
   t_start_ms = millis();
 
   Serial.println("Gyro-only roll integration + CSV logging started...");
@@ -154,92 +147,78 @@ void loop() {
     }
   }
 
-  // If logging is finished, do nothing (or keep printing)
+  // If logging is finished, do nothing
   if (!logging_active) {
     delay(50);
     return;
   }
 
+  // Elapsed time since start (seconds)
+  float t_elapsed_s = (millis() - t_start_ms) * 1e-3f;
+
+  // Stop condition
+  if (STOP_TIME_S > 0.0f && t_elapsed_s >= STOP_TIME_S) {
+    logging_active = false;
+    csvFile.flush();
+    csvFile.close();
+
+    Serial.println("\nLogging finished (stop_time reached). CSV file closed.");
+    Serial.println("Type 'd' to dump the CSV over Serial.");
+    return;
+  }
+
   // ------------------------------------------------------------
-  // Compute dt in seconds
+  // Read gyroscope (only proceed when a sample is available)
   // ------------------------------------------------------------
+  if (!IMU.gyroscopeAvailable()) {
+    delay(1);  // small wait to avoid busy loop
+    return;
+  }
+
+  // ---- IMPORTANT FIX: compute dt ONLY at gyro-sample time ----
   unsigned long t_now_us = micros();
   float dt = (t_now_us - t_prev_us) * 1e-6f;  // us -> s
   t_prev_us = t_now_us;
 
   // Guard against weird dt (startup/rare spikes)
   if (dt <= 0.0f || dt > 0.5f) {
-    dt = 0.01f; // fallback to 10 ms
+    dt = 0.01f; // fallback
   }
 
-  // Elapsed time since start (seconds)
-  float t_elapsed_s = (millis() - t_start_ms) * 1e-3f;
-
-  // ------------------------------------------------------------
-  // Stop condition:
-  //   STOP_TIME_S == 0  -> never stop
-  //   STOP_TIME_S > 0   -> stop after STOP_TIME_S seconds
-  // ------------------------------------------------------------
-  if (STOP_TIME_S > 0.0f && t_elapsed_s >= STOP_TIME_S) {
-    logging_active = false;
-
-    // Close the file cleanly
-    csvFile.flush();
-    csvFile.close();
-
-    Serial.println("\nLogging finished (stop_time reached). CSV file closed.");
-    Serial.println("Type 'd' to dump the CSV over Serial.");
-
-    return;
-  }
-
-  // ------------------------------------------------------------
-  // Read gyroscope (Arduino_LSM9DS1 returns deg/s)
-  // ------------------------------------------------------------
   float gx, gy, gz;
-  if (IMU.gyroscopeAvailable()) {
-    IMU.readGyroscope(gx, gy, gz);
+  IMU.readGyroscope(gx, gy, gz);
 
-    // Select roll rate component
-    float omega_deg_s = 0.0f;
-    if (ROLL_AXIS == GX_AXIS) omega_deg_s = gx;
-    if (ROLL_AXIS == GY_AXIS) omega_deg_s = gy;
-    if (ROLL_AXIS == GZ_AXIS) omega_deg_s = gz;
+  // Select roll rate component
+  float omega_deg_s = 0.0f;
+  if (ROLL_AXIS == GX_AXIS) omega_deg_s = gx;
+  if (ROLL_AXIS == GY_AXIS) omega_deg_s = gy;
+  if (ROLL_AXIS == GZ_AXIS) omega_deg_s = gz;
 
-    // ------------------------------------------------------------
-    // Discrete integration: theta = theta + omega * dt
-    // ------------------------------------------------------------
-    roll_gyro_deg += omega_deg_s * dt;
+  // Discrete integration: theta = theta + omega * dt
+  roll_gyro_deg += omega_deg_s * dt;
 
-    // Optional: keep angle bounded (prevents number from growing forever)
-    if (roll_gyro_deg > 180.0f) roll_gyro_deg -= 360.0f;
-    if (roll_gyro_deg < -180.0f) roll_gyro_deg += 360.0f;
+  // Optional: keep angle bounded
+  if (roll_gyro_deg > 180.0f) roll_gyro_deg -= 360.0f;
+  if (roll_gyro_deg < -180.0f) roll_gyro_deg += 360.0f;
 
-    // ------------------------------------------------------------
-    // Serial Plotter output (keep it simple for plotting)
-    // ------------------------------------------------------------
-    Serial.print("roll_gyro_deg:");
-    Serial.println(roll_gyro_deg);
+  // Serial Plotter output
+  Serial.print("roll_gyro_deg:");
+  Serial.println(roll_gyro_deg);
 
-    // ------------------------------------------------------------
-    // CSV logging
-    // Columns:
-    //   time_s, dt_s, gx, gy, gz, omega_roll, roll_angle
-    // ------------------------------------------------------------
-    csvFile.print(t_elapsed_s, 6); csvFile.print(",");
-    csvFile.print(dt, 6);         csvFile.print(",");
-    csvFile.print(gx, 6);         csvFile.print(",");
-    csvFile.print(gy, 6);         csvFile.print(",");
-    csvFile.print(gz, 6);         csvFile.print(",");
-    csvFile.print(omega_deg_s, 6);csvFile.print(",");
-    csvFile.println(roll_gyro_deg, 6);
+  // CSV logging
+  csvFile.print(t_elapsed_s, 6); csvFile.print(",");
+  csvFile.print(dt, 6);         csvFile.print(",");
+  csvFile.print(gx, 6);         csvFile.print(",");
+  csvFile.print(gy, 6);         csvFile.print(",");
+  csvFile.print(gz, 6);         csvFile.print(",");
+  csvFile.print(omega_deg_s, 6);csvFile.print(",");
+  csvFile.println(roll_gyro_deg, 6);
 
-    // Flush periodically to reduce flash wear + ensure data is saved
-    lineCount++;
-    if (lineCount % FLUSH_EVERY_N_LINES == 0) {
-      csvFile.flush();
-    }
+  // Flush periodically
+  lineCount++;
+  if (lineCount % FLUSH_EVERY_N_LINES == 0) {
+    csvFile.flush();
   }
 
-  delay(5); // small delay (optional)
+  delay(5);
 }
