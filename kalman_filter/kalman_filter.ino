@@ -65,11 +65,11 @@ static const float FIXED_TS_S   = 0.01f;         // 10 ms if you force fixed Ts
 // Kalman noise variances (tune these in part d):
 // sigma_w^2 : process noise variance (model / gyro uncertainty) :contentReference[oaicite:6]{index=6}
 // sigma_v^2 : measurement noise variance (accelerometer-angle uncertainty) :contentReference[oaicite:7]{index=7}
-static const float SIGMA_W2 = 1.00f;   // (deg/s)^2   <-- tune
+static const float SIGMA_W2 = 0.10f;   // (deg/s)^2   <-- tune
 static const float SIGMA_V2 = 0.50f;   // (deg)^2     <-- tune (see note below)
 
 // Initial covariance P0 = Sigma_hat[k|k]  (tune in part d)
-static const float P0 = 10.0f;
+static const float P0 = 1.0f;
 
 // Loop pacing (optional)
 static const uint32_t LOOP_DELAY_MS = 5;
