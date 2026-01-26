@@ -1,0 +1,67 @@
+=== MAG CAL DONE ===
+min (uT): -12.000	-26.135	16.895
+max (uT): 38.342	20.374	75.500
+
+Hard-iron offsets (uT) [subtract these from raw mag]:
+offX = 13.171
+offY = -2.881
+offZ = 46.198
+
+Apply like:
+mx_corr = mx_raw - offX;  my_corr = my_raw - offY;  mz_corr = mz_raw - offZ;
+
+=== ACCEL BIAS DONE ===
+mean (g): -0.01587	0.00694	0.99835
+Bias to subtract (g):
+bax = -0.01587
+bay = 0.00694
+baz = -0.00165
+
+Apply like:
+ax_corr = ax_raw - bax;
+ay_corr = ay_raw - bay;
+az_corr = az_raw - baz;
+=======================
+
+
+================ RESULTS ================
+
+Snapshot: FLAT (Z up)
+  RAW  accel(g): -0.01603	0.01253	0.99805
+  RAW  mag (uT): 22.996	10.234	45.140
+  CORR accel(g): -0.00016	0.00559	0.99970
+  CORR mag (uT): 9.825	13.115	-1.058
+  |a| = 0.99971   |m| = 16.421
+
+Snapshot: ROLL-FLIP (Z down)
+  RAW  accel(g): -0.04945	-0.07140	-1.00580
+  RAW  mag (uT): 20.076	-4.177	49.193
+  CORR accel(g): -0.03358	-0.07834	-1.00415
+  CORR mag (uT): 6.905	-1.296	2.995
+  |a| = 1.00776   |m| = 7.637
+
+Snapshot: PITCH-FLIP (Z down)
+  RAW  accel(g): -0.05030	-0.00328	-1.00523
+  RAW  mag (uT): 5.774	10.691	50.313
+  CORR accel(g): -0.03443	-0.01022	-1.00358
+  CORR mag (uT): -7.397	13.572	4.115
+  |a| = 1.00422   |m| = 15.995
+
+---- Pairwise checks (look for Z consistency) ----
+
+FLAT vs ROLL-FLIP:
+  Accel sign flips (ax,ay,az): 0, 1, 1
+  Mag   sign flips (mx,my,mz): 0, 1, 1
+  |Δm| components (x,y,z): 2.920, 14.411, 4.052
+  Largest Δm axis: Y
+
+FLAT vs PITCH-FLIP:
+  Accel sign flips (ax,ay,az): 0, 1, 1
+  Mag   sign flips (mx,my,mz): 1, 0, 1
+  |Δm| components (x,y,z): 17.222, 0.457, 5.172
+  Largest Δm axis: X
+
+Interpretation:
+  - In BOTH flips, accel az should flip sign strongly.
+  - The mag component corresponding to the sensor Z axis should also change sign strongly.
+  - If mag Z does NOT react, but mag X or Y reacts most, mag axes are permuted vs accel.
