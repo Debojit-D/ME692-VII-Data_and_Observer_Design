@@ -1,67 +1,86 @@
-=== MAG CAL DONE ===
-min (uT): -12.000	-26.135	16.895
-max (uT): 38.342	20.374	75.500
+min (uT): -47.510	40.527	4.932
+max (uT): -0.085	85.718	57.312
 
 Hard-iron offsets (uT) [subtract these from raw mag]:
-offX = 13.171
-offY = -2.881
-offZ = 46.198
+offX = -23.797607
+offY = 63.122559
+offZ = 31.121826
 
-Apply like:
-mx_corr = mx_raw - offX;  my_corr = my_raw - offY;  mz_corr = mz_raw - offZ;
+Soft-iron diagonal scale factors (unitless) [multiply after offset]:
+sX = 1.019133
+sY = 1.069512
+sZ = 0.922706
+
+Apply in your TRIAD / filter code like:
+  // raw: mx,my,mz in uT
+  mx = (mx - offX) * sX;
+  my = (my - offY) * sY;
+  mz = (mz - offZ) * sZ;
+  // then normalize for TRIAD:
+  norm = sqrt(mx*mx + my*my + mz*mz); mx/=norm; my/=norm; mz/=norm;
+
+Paste-ready constants:
+const float offX = -23.797607f;
+const float offY = 63.122559f;
+const float offZ = 31.121826f;
+const float sX   = 1.019133f;
+const float sY   = 1.069512f;
+const float sZ   = 0.922706f;
+=======================================
 
 === ACCEL BIAS DONE ===
-mean (g): -0.01587	0.00694	0.99835
+mean (g): -0.02965	-0.02873	0.95940
 Bias to subtract (g):
-bax = -0.01587
-bay = 0.00694
-baz = -0.00165
+bax = -0.02965
+bay = -0.02873
+baz = -0.04060
 
 Apply like:
 ax_corr = ax_raw - bax;
 ay_corr = ay_raw - bay;
 az_corr = az_raw - baz;
-=======================
 
 
 ================ RESULTS ================
 
 Snapshot: FLAT (Z up)
-  RAW  accel(g): -0.01603	0.01253	0.99805
-  RAW  mag (uT): 22.996	10.234	45.140
-  CORR accel(g): -0.00016	0.00559	0.99970
-  CORR mag (uT): 9.825	13.115	-1.058
-  |a| = 0.99971   |m| = 16.421
+  RAW  accel(g): -0.02925	-0.02824	0.95965
+  RAW  mag (uT): -37.019	52.381	26.144
+  CORR accel(g): -0.01338	-0.03518	0.96130
+  CORR mag (uT): -50.190	55.262	-20.054
+  |a| = 0.96203   |m| = 77.299
 
 Snapshot: ROLL-FLIP (Z down)
-  RAW  accel(g): -0.04945	-0.07140	-1.00580
-  RAW  mag (uT): 20.076	-4.177	49.193
-  CORR accel(g): -0.03358	-0.07834	-1.00415
-  CORR mag (uT): 6.905	-1.296	2.995
-  |a| = 1.00776   |m| = 7.637
+  RAW  accel(g): 0.07928	0.01597	-1.03399
+  RAW  mag (uT): -37.609	47.699	46.257
+  CORR accel(g): 0.09515	0.00903	-1.03234
+  CORR mag (uT): -50.780	50.580	0.059
+  |a| = 1.03676   |m| = 71.673
 
 Snapshot: PITCH-FLIP (Z down)
-  RAW  accel(g): -0.05030	-0.00328	-1.00523
-  RAW  mag (uT): 5.774	10.691	50.313
-  CORR accel(g): -0.03443	-0.01022	-1.00358
-  CORR mag (uT): -7.397	13.572	4.115
-  |a| = 1.00422   |m| = 15.995
+  RAW  accel(g): -0.10975	-0.01693	-1.03386
+  RAW  mag (uT): -11.211	88.870	37.709
+  CORR accel(g): -0.09388	-0.02387	-1.03221
+  CORR mag (uT): -24.382	91.751	-8.489
+  |a| = 1.03674   |m| = 95.314
 
 ---- Pairwise checks (look for Z consistency) ----
 
 FLAT vs ROLL-FLIP:
-  Accel sign flips (ax,ay,az): 0, 1, 1
-  Mag   sign flips (mx,my,mz): 0, 1, 1
-  |Δm| components (x,y,z): 2.920, 14.411, 4.052
-  Largest Δm axis: Y
+  Accel sign flips (ax,ay,az): 1, 1, 1
+  Mag   sign flips (mx,my,mz): 0, 0, 1
+  |Δm| components (x,y,z): 0.590, 4.682, 20.113
+  Largest Δm axis: Z
 
 FLAT vs PITCH-FLIP:
-  Accel sign flips (ax,ay,az): 0, 1, 1
-  Mag   sign flips (mx,my,mz): 1, 0, 1
-  |Δm| components (x,y,z): 17.222, 0.457, 5.172
-  Largest Δm axis: X
+  Accel sign flips (ax,ay,az): 0, 0, 1
+  Mag   sign flips (mx,my,mz): 0, 0, 0
+  |Δm| components (x,y,z): 25.808, 36.489, 11.565
+  Largest Δm axis: Y
 
 Interpretation:
   - In BOTH flips, accel az should flip sign strongly.
   - The mag component corresponding to the sensor Z axis should also change sign strongly.
   - If mag Z does NOT react, but mag X or Y reacts most, mag axes are permuted vs accel.
+
+=========================================
