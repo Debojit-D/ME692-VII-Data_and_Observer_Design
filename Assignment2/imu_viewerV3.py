@@ -503,7 +503,7 @@ def main():
         # Draw the board
         glPushMatrix()
         glMultMatrixf(M.astype(np.float32))
-        draw_box(L=2.1, W=1.1, H=0.18)
+        draw_box(L=1.1, W=2.1, H=0.18)
         glPopMatrix()
 
         # HUD overlay (pygame blit)

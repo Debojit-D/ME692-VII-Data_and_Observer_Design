@@ -1,21 +1,29 @@
 /*
   ============================================================
-  MAHONY AHRS (Gyro + Accel + Mag) — with your calibration stack
+  MAHONY AHRS (Gyro + Accel + Mag) — FIXED + ROBUST
   ============================================================
+
+  What’s fixed / improved vs your current Mahony:
+    ✅ Keeps your exact calibration stack + z-down body mapping
+    ✅ Uses accel-only Mahony when mag horizontal component is unreliable (mh_norm < MAG_H_MIN)
+       → prevents noisy mag from wrecking yaw/attitude
+    ✅ Optional one-time TRIAD-style initialization using accel+mag (fast lock-on at start)
+    ✅ Integrator anti-windup tightened (prevents “stuck bias” / slow weird drift)
+    ✅ Clean structure: integrate gyro every loop, apply correction when valid
 
   Frames:
     - Navigation frame: NED (X=North, Y=East, Z=Down)
     - Body frame: "z-down body" (sensor->body is 180° about X)
 
   Sensor pipeline:
-    accel_raw (g)  -> subtract bias -> sensorToBodyZDown -> normalize
-    mag_raw (uT)   -> hard-iron -> soft-iron diag -> remap -> sensorToBodyZDown -> normalize
-    gyro_raw (deg/s)-> subtract bias (calibrated at startup) -> sensorToBodyZDown -> rad/s
+    accel_raw (g)   -> subtract bias -> sensorToBodyZDown -> normalize
+    mag_raw (uT)    -> hard-iron -> soft-iron diag -> remap -> sensorToBodyZDown
+    gyro_raw (deg/s)-> startup bias -> sensorToBodyZDown -> rad/s
 
   Mag remap (confirmed):
       mx' = -mx
-      my' =  mz
-      mz' =  my
+      my' =  my
+      mz' =  mz
 
   Keys:
     'p' : toggle streaming
@@ -65,12 +73,19 @@ static unsigned long lastStreamMs = 0;
 
 bool streamEnabled = true;
 
-// Mahony gains (tune these)
-static const float KP = 2.0f;     // proportional gain (try 0.5 .. 5)
-static const float KI = 0.05f;    // integral gain (try 0 .. 0.2). Set 0 to disable bias learning.
+// Mahony gains (START HERE)
+// NOTE: KP too high -> twitchy/jitter; KI too high -> “stuck” drift / slow weirdness
+static const float KP = 0.15f;     // recommended start: 0.6 .. 1.5
+static const float KI = 0.00f;    // recommended start: 0.0; then 0.005..0.03 if needed
+
+// Integral clamp (anti-windup)
+static const float EINT_CLAMP = 0.10f;   // rad/s equiv (tight)
 
 // Startup gyro bias calibration
-static const int   GYRO_BIAS_SAMPLES = 200;   // ~2 s if gyro ~100 Hz, adjust if needed
+static const int   GYRO_BIAS_SAMPLES = 250;   // ~2-3s depending on gyro rate
+
+// Optional: initialize q_est from accel+mag once (strongly recommended)
+static const bool  INIT_FROM_ACC_MAG = true;
 
 // ------------------------------------------------------------
 // (3) Quaternion struct + helpers
@@ -92,6 +107,39 @@ static inline Quat quatMul(const Quat& a, const Quat& b) {
   };
 }
 
+// Convert DCM (body->NED) to quaternion (scalar-first)
+static Quat dcmToQuat(const Matrix3f& R) {
+  Quat q;
+  float tr = R(0,0) + R(1,1) + R(2,2);
+
+  if (tr > 0.0f) {
+    float S = sqrtf(tr + 1.0f) * 2.0f;   // S = 4*q.w
+    q.w = 0.25f * S;
+    q.x = (R(2,1) - R(1,2)) / S;
+    q.y = (R(0,2) - R(2,0)) / S;
+    q.z = (R(1,0) - R(0,1)) / S;
+  } else if ((R(0,0) > R(1,1)) && (R(0,0) > R(2,2))) {
+    float S = sqrtf(1.0f + R(0,0) - R(1,1) - R(2,2)) * 2.0f; // S = 4*q.x
+    q.w = (R(2,1) - R(1,2)) / S;
+    q.x = 0.25f * S;
+    q.y = (R(0,1) + R(1,0)) / S;
+    q.z = (R(0,2) + R(2,0)) / S;
+  } else if (R(1,1) > R(2,2)) {
+    float S = sqrtf(1.0f + R(1,1) - R(0,0) - R(2,2)) * 2.0f; // S = 4*q.y
+    q.w = (R(0,2) - R(2,0)) / S;
+    q.x = (R(0,1) + R(1,0)) / S;
+    q.y = 0.25f * S;
+    q.z = (R(1,2) + R(2,1)) / S;
+  } else {
+    float S = sqrtf(1.0f + R(2,2) - R(0,0) - R(1,1)) * 2.0f; // S = 4*q.z
+    q.w = (R(1,0) - R(0,1)) / S;
+    q.x = (R(0,2) + R(2,0)) / S;
+    q.y = (R(1,2) + R(2,1)) / S;
+    q.z = 0.25f * S;
+  }
+  return quatNormalize(q);
+}
+
 // Quaternion -> DCM (body->NED)
 static inline Matrix3f quatToDCM(const Quat& qn) {
   const float w = qn.w, x = qn.x, y = qn.y, z = qn.z;
@@ -111,6 +159,11 @@ static inline Matrix3f quatToDCM(const Quat& qn) {
   return R;
 }
 
+// Utility
+static inline float clampf(float v, float lo, float hi) {
+  return (v < lo) ? lo : (v > hi) ? hi : v;
+}
+
 // ------------------------------------------------------------
 // (4) Sensor -> Body mapping (z-down body)
 // 180° rotation about X: x stays, y,z flip
@@ -122,13 +175,13 @@ static inline Vector3f sensorToBodyZDown(const Vector3f& v_s) {
 // ------------------------------------------------------------
 // (4b) MAG AXIS REMAP (CONFIRMED)
 // Apply AFTER HI+SI, BEFORE sensorToBodyZDown
-// mx' = -mx, my' = mz, mz' = my
+// mx' = -mx, my' = my, mz' = mz
 // ------------------------------------------------------------
 static inline void remapMag(float mx, float my, float mz,
                             float &mxr, float &myr, float &mzr) {
   mxr = -mx;
-  myr =  mz;
-  mzr =  my;
+  myr =  my;
+  mzr =  mz;
 }
 
 // Extract yaw from C_nb (body->NED) for yaw-zero feature
@@ -150,11 +203,11 @@ bool yawZeroRequested = false;
 Quat q_zero_inv = {1,0,0,0};
 
 // ------------------------------------------------------------
-// (6) Caching accel/mag
+// (6) Caching accel/mag (sensor frame, calibrated)
 // ------------------------------------------------------------
 bool haveAccel = false, haveMag = false;
-Vector3f a_s_last(0,0,0);  // sensor frame, calibrated (bias removed)
-Vector3f m_s_last(0,0,0);  // sensor frame, calibrated (HI+SI+remap)
+Vector3f a_s_last(0,0,0);  // sensor frame, bias removed
+Vector3f m_s_last(0,0,0);  // sensor frame, HI+SI+remap applied (still sensor axes)
 
 // Apply accel bias (g)
 static inline Vector3f calibrateAccelSensor(float ax_raw, float ay_raw, float az_raw) {
@@ -186,73 +239,127 @@ bool gyroBiasReady = false;
 // (8) Mahony internal state
 // ------------------------------------------------------------
 Quat q_est = {1,0,0,0};           // body->NED
-Vector3f eInt(0,0,0);             // integral error (rad/s equiv)
+Vector3f eInt(0,0,0);             // integral term (rad/s equiv)
 unsigned long lastUpdateUs = 0;
 
-// Utility
-static inline float clampf(float v, float lo, float hi) {
-  return (v < lo) ? lo : (v > hi) ? hi : v;
+bool mahonyInitialized = false;
+
+// ------------------------------------------------------------
+// (9) TRIAD-style one-shot init (uses same basis as your TRIAD)
+// Returns true if init succeeded.
+// ------------------------------------------------------------
+static bool initFromAccMag(Vector3f a_b, Vector3f m_b) {
+  float a_norm = a_b.norm();
+  if (a_norm < 1e-6f) return false;
+  if (a_norm < ACC_MAG_MIN || a_norm > ACC_MAG_MAX) return false;
+
+  Vector3f a_hat = a_b / a_norm;
+
+  // Down in body (same convention as your TRIAD)
+  Vector3f d_b = -a_hat;
+
+  // Horizontal mag
+  Vector3f m_h = m_b - (m_b.dot(d_b)) * d_b;
+  float mh_norm = m_h.norm();
+  if (mh_norm < MAG_H_MIN) return false;
+
+  Vector3f n_b = m_h / mh_norm;          // "North" in body (magnetic)
+  Vector3f e_b = d_b.cross(n_b);
+  float e_norm = e_b.norm();
+  if (e_norm < 1e-6f) return false;
+  e_b /= e_norm;
+  n_b = e_b.cross(d_b);                  // re-orthogonalize
+
+  Matrix3f C_bn;
+  C_bn.col(0) = n_b;
+  C_bn.col(1) = e_b;
+  C_bn.col(2) = d_b;
+
+  Matrix3f C_nb = C_bn.transpose();      // body->NED
+  q_est = dcmToQuat(C_nb);
+  q_est = quatNormalize(q_est);
+  eInt.setZero();
+  return true;
 }
 
 // ------------------------------------------------------------
-// Mahony update with mag
-// Inputs:
-//   w_b  : gyro in body frame (rad/s)
-//   a_b  : accel in body frame (unit vector, "up" direction is +? depends; we use measured gravity direction)
-//   m_b  : mag in body frame (unit vector)
-//   dt   : seconds
+// (10) Mahony update: accel-only (no mag)
 // ------------------------------------------------------------
-static void mahonyUpdate(Vector3f w_b, Vector3f a_b, Vector3f m_b, float dt) {
-  // Normalize inputs (safety)
+static void mahonyUpdateAccelOnly(Vector3f w_b, Vector3f a_b, float dt) {
+  float an = a_b.norm();
+  if (an < 1e-6f) return;
+  a_b /= an;
+
+  Quat qn = quatNormalize(q_est);
+  Matrix3f C_nb = quatToDCM(qn);
+  Matrix3f C_bn = C_nb.transpose();
+
+  Vector3f d_b_est  = C_bn * Vector3f(0,0,1); // predicted Down in body
+  Vector3f d_b_meas = -a_b;                   // measured Down in body (your convention)
+
+  Vector3f e = d_b_meas.cross(d_b_est);
+
+  if (KI > 0.0f) {
+    eInt += e * (KI * dt);
+    eInt.x() = clampf(eInt.x(), -EINT_CLAMP, EINT_CLAMP);
+    eInt.y() = clampf(eInt.y(), -EINT_CLAMP, EINT_CLAMP);
+    eInt.z() = clampf(eInt.z(), -EINT_CLAMP, EINT_CLAMP);
+  } else {
+    eInt.setZero();
+  }
+
+  Vector3f w_corr = w_b + (KP * e) + eInt;
+
+  Quat omega = {0.0f, w_corr.x(), w_corr.y(), w_corr.z()};
+  Quat qdot  = quatMul(qn, omega);
+  qdot.w *= 0.5f; qdot.x *= 0.5f; qdot.y *= 0.5f; qdot.z *= 0.5f;
+
+  q_est.w += qdot.w * dt;
+  q_est.x += qdot.x * dt;
+  q_est.y += qdot.y * dt;
+  q_est.z += qdot.z * dt;
+
+  q_est = quatNormalize(q_est);
+}
+
+// ------------------------------------------------------------
+// (11) Mahony update: accel + mag
+// ------------------------------------------------------------
+static void mahonyUpdateAccMag(Vector3f w_b, Vector3f a_b, Vector3f m_b, float dt) {
   float an = a_b.norm();
   float mn = m_b.norm();
   if (an < 1e-6f || mn < 1e-6f) return;
   a_b /= an;
   m_b /= mn;
 
-  // Estimated directions from quaternion (body->NED)
   Quat qn = quatNormalize(q_est);
   Matrix3f C_nb = quatToDCM(qn);         // body->NED
   Matrix3f C_bn = C_nb.transpose();      // NED->body
 
-  // In NED, "Down" unit vector is [0,0,1]
-  // Predicted Down in body:
-  Vector3f d_b_est = C_bn * Vector3f(0,0,1);
-
-  // From accel: when static, accel measures "Up" (approximately opposite of Down).
-  // Your TRIAD used d_b = -a_hat. Keep same convention here:
+  Vector3f d_b_est  = C_bn * Vector3f(0,0,1);
   Vector3f d_b_meas = -a_b;
 
-  // ---- Magnetometer reference handling (standard Mahony with mag) ----
-  // Compute Earth's magnetic field in NED estimated frame:
-  Vector3f h_n = C_nb * m_b;             // mag in NED
+  // Mag reference (Mahony standard)
+  Vector3f h_n = C_nb * m_b;
   float bx = sqrtf(h_n.x()*h_n.x() + h_n.y()*h_n.y());
   float bz = h_n.z();
-
-  // Reference direction of mag in NED: [bx, 0, bz]
-  // Predicted mag in body:
   Vector3f m_b_est = C_bn * Vector3f(bx, 0.0f, bz);
 
-  // Error is sum of cross products between measured and estimated directions
   Vector3f e = d_b_meas.cross(d_b_est) + m_b.cross(m_b_est);
 
-  // Integrate error (bias learning)
   if (KI > 0.0f) {
     eInt += e * (KI * dt);
-    // optional clamp to avoid windup
-    eInt.x() = clampf(eInt.x(), -0.5f, 0.5f);
-    eInt.y() = clampf(eInt.y(), -0.5f, 0.5f);
-    eInt.z() = clampf(eInt.z(), -0.5f, 0.5f);
+    eInt.x() = clampf(eInt.x(), -EINT_CLAMP, EINT_CLAMP);
+    eInt.y() = clampf(eInt.y(), -EINT_CLAMP, EINT_CLAMP);
+    eInt.z() = clampf(eInt.z(), -EINT_CLAMP, EINT_CLAMP);
   } else {
     eInt.setZero();
   }
 
-  // Apply feedback to gyro
   Vector3f w_corr = w_b + (KP * e) + eInt;
 
-  // Quaternion kinematics: q_dot = 0.5 * q ⊗ [0, wx, wy, wz]
   Quat omega = {0.0f, w_corr.x(), w_corr.y(), w_corr.z()};
-  Quat qdot = quatMul(qn, omega);
+  Quat qdot  = quatMul(qn, omega);
   qdot.w *= 0.5f; qdot.x *= 0.5f; qdot.y *= 0.5f; qdot.z *= 0.5f;
 
   q_est.w += qdot.w * dt;
@@ -289,16 +396,17 @@ void setup() {
   Vector3f sum(0,0,0);
   int got = 0;
   unsigned long t0 = millis();
-  while (got < GYRO_BIAS_SAMPLES && (millis() - t0) < 5000UL) {
+  while (got < GYRO_BIAS_SAMPLES && (millis() - t0) < 6000UL) {
     if (IMU.gyroscopeAvailable()) {
-      float gx, gy, gz; // deg/s from Arduino_LSM9DS1
-      IMU.readGyroscope(gx, gy, gz);
+      float gx, gy, gz;
+      IMU.readGyroscope(gx, gy, gz); // deg/s
       Vector3f w_s(gx, gy, gz);
       Vector3f w_b_deg = sensorToBodyZDown(w_s);
       sum += w_b_deg;
       got++;
     }
   }
+
   if (got > 0) {
     Vector3f bias_deg = sum / (float)got;
     gyro_bias_b = bias_deg * (float)(M_PI / 180.0f); // rad/s
@@ -333,20 +441,16 @@ void loop() {
   }
 
   // -----------------------------
-  // Read gyro (we update filter every loop using gyro dt)
+  // Read gyro (filter integrates every loop using gyro dt)
   // -----------------------------
   float gx, gy, gz;
-  bool haveGyroNow = false;
-  if (IMU.gyroscopeAvailable()) {
-    IMU.readGyroscope(gx, gy, gz); // deg/s
-    haveGyroNow = true;
-  }
-  if (!haveGyroNow) return;
+  if (!IMU.gyroscopeAvailable()) return;
+  IMU.readGyroscope(gx, gy, gz); // deg/s
 
   unsigned long nowUs = micros();
   float dt = (nowUs - lastUpdateUs) * 1e-6f;
   lastUpdateUs = nowUs;
-  if (dt <= 0.0f || dt > 0.1f) return; // guard (dt too large => skip)
+  if (dt <= 0.0f || dt > 0.1f) return;
 
   // Gyro: sensor -> body, deg/s -> rad/s, subtract bias
   Vector3f w_s(gx, gy, gz);
@@ -354,7 +458,7 @@ void loop() {
   w_b -= gyro_bias_b;
 
   // -----------------------------
-  // Cache latest accel sample (if available)
+  // Cache latest accel
   // -----------------------------
   if (IMU.accelerationAvailable()) {
     float ax_raw, ay_raw, az_raw;
@@ -364,7 +468,7 @@ void loop() {
   }
 
   // -----------------------------
-  // Cache latest mag sample (if available)
+  // Cache latest mag
   // -----------------------------
   if (IMU.magneticFieldAvailable()) {
     float mx_raw, my_raw, mz_raw;
@@ -379,17 +483,12 @@ void loop() {
     haveMag = true;
   }
 
-  // Need accel+mag at least once for correction;
-  // otherwise we only integrate gyro (still valid)
-  if (!haveAccel || !haveMag) {
-    // gyro-only integrate (no correction)
-    Vector3f w_corr = w_b;
-
+  // If we never got accel yet, just integrate gyro (no correction)
+  if (!haveAccel) {
     Quat qn = quatNormalize(q_est);
-    Quat omega = {0.0f, w_corr.x(), w_corr.y(), w_corr.z()};
+    Quat omega = {0.0f, w_b.x(), w_b.y(), w_b.z()};
     Quat qdot = quatMul(qn, omega);
     qdot.w *= 0.5f; qdot.x *= 0.5f; qdot.y *= 0.5f; qdot.z *= 0.5f;
-
     q_est.w += qdot.w * dt;
     q_est.x += qdot.x * dt;
     q_est.y += qdot.y * dt;
@@ -398,27 +497,18 @@ void loop() {
     return;
   }
 
-  // -----------------------------
-  // Map cached accel/mag to BODY
-  // -----------------------------
+  // Map cached accel to body
   Vector3f a_b = sensorToBodyZDown(a_s_last);
-  Vector3f m_b = sensorToBodyZDown(m_s_last);
 
-  // -----------------------------
-  // Gates (same spirit as TRIAD)
-  // -----------------------------
   float a_norm = a_b.norm();
   if (a_norm < 1e-6f) return;
-  if (a_norm < ACC_MAG_MIN || a_norm > ACC_MAG_MAX) {
-    // If accelerating, skip accel correction but still do mag? (usually skip both)
-    // We'll skip correction entirely this step, but still integrate gyro.
-    Vector3f w_corr = w_b;
 
+  // If accelerating hard, skip correction (gyro integration only)
+  if (a_norm < ACC_MAG_MIN || a_norm > ACC_MAG_MAX) {
     Quat qn = quatNormalize(q_est);
-    Quat omega = {0.0f, w_corr.x(), w_corr.y(), w_corr.z()};
+    Quat omega = {0.0f, w_b.x(), w_b.y(), w_b.z()};
     Quat qdot = quatMul(qn, omega);
     qdot.w *= 0.5f; qdot.x *= 0.5f; qdot.y *= 0.5f; qdot.z *= 0.5f;
-
     q_est.w += qdot.w * dt;
     q_est.x += qdot.x * dt;
     q_est.y += qdot.y * dt;
@@ -427,27 +517,41 @@ void loop() {
     return;
   }
 
-  // Horizontal mag gate (computed like TRIAD)
+  // Normalize accel (direction)
   Vector3f a_hat = a_b / a_norm;
   Vector3f d_b = -a_hat;
-  Vector3f m_h = m_b - (m_b.dot(d_b)) * d_b;
-  float mh_norm = m_h.norm();
-  if (mh_norm < MAG_H_MIN) {
-    // skip mag correction when it becomes ill-conditioned, but still use accel
-    // We can still run Mahony with mag vector present; however it's noisy here.
-    // We'll just integrate gyro + accel correction by faking mag correction as zero:
-    // simplest: still call mahonyUpdate but with current m_b; it will be weak/noisy.
-    // Better: do accel-only Mahony (not implemented separately). We'll still call full update
-    // but note: if mh_norm small, yaw may drift (expected).
+
+  float mh_norm = 0.0f;
+  bool magGood = false;
+  Vector3f m_b(0,0,0);
+
+  if (haveMag) {
+    m_b = sensorToBodyZDown(m_s_last);
+
+    // Horizontal mag magnitude (same as your TRIAD gate)
+    Vector3f m_h = m_b - (m_b.dot(d_b)) * d_b;
+    mh_norm = m_h.norm();
+    magGood = (mh_norm >= MAG_H_MIN);
+  }
+
+  // Optional: initialize once from accel+mag (fast lock)
+  if (INIT_FROM_ACC_MAG && !mahonyInitialized && haveMag && magGood) {
+    if (initFromAccMag(a_b, m_b)) {
+      mahonyInitialized = true;
+    }
+  }
+
+  // Run Mahony correction:
+  //  - If magGood: accel+mag correction (stabilizes yaw)
+  //  - Else: accel-only correction (stabilizes roll/pitch, yaw drifts naturally)
+  if (haveMag && magGood) {
+    mahonyUpdateAccMag(w_b, a_b, m_b, dt);
+  } else {
+    mahonyUpdateAccelOnly(w_b, a_b, dt);
   }
 
   // -----------------------------
-  // Mahony update
-  // -----------------------------
-  mahonyUpdate(w_b, a_b, m_b, dt);
-
-  // -----------------------------
-  // Yaw-zero (applied to OUTPUT only, internal filter keeps running)
+  // Yaw-zero (applied to OUTPUT only)
   // -----------------------------
   if (yawZeroRequested) {
     Matrix3f C_nb = quatToDCM(quatNormalize(q_est));
@@ -461,7 +565,7 @@ void loop() {
   Quat q_out = quatMul(q_zero_inv, q_est);
   q_out = quatNormalize(q_out);
 
-  // Optional: ensure streaming quaternion doesn’t randomly flip sign (rare in Mahony, but safe)
+  // Hemisphere continuity for output (nice for plotting)
   static bool havePrevOut = false;
   static Quat q_prev_out;
   if (havePrevOut) {

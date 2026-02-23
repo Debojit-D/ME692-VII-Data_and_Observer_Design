@@ -8,8 +8,8 @@
     Your NEW accelerometer bias (flat + still, +Z up)
     Magnetometer AXIS REMAP from your solver result:
          mx' = -mx
-         my' = mz
-         mz' = my
+         my' = my
+         mz' = mz
     Normalizes accel + mag (TRIAD uses direction)
     Caches accel/mag so they don’t need to be “Available” at same instant
     Keeps your z-down body mapping + yaw-zero feature
