@@ -75,11 +75,11 @@ bool streamEnabled = true;
 
 // Mahony gains (START HERE)
 // NOTE: KP too high -> twitchy/jitter; KI too high -> “stuck” drift / slow weirdness
-static const float KP = 0.15f;     // recommended start: 0.6 .. 1.5
-static const float KI = 0.00f;    // recommended start: 0.0; then 0.005..0.03 if needed
+static const float KP = 0.18f;     // recommended start: 0.6 .. 1.5
+static const float KI = 0.0002f;    // recommended start: 0.0; then 0.005..0.03 if needed
 
 // Integral clamp (anti-windup)
-static const float EINT_CLAMP = 0.10f;   // rad/s equiv (tight)
+static const float EINT_CLAMP = 0.20f;   // rad/s equiv (tight)
 
 // Startup gyro bias calibration
 static const int   GYRO_BIAS_SAMPLES = 250;   // ~2-3s depending on gyro rate
@@ -170,6 +170,13 @@ static inline float clampf(float v, float lo, float hi) {
 // ------------------------------------------------------------
 static inline Vector3f sensorToBodyZDown(const Vector3f& v_s) {
   return Vector3f(v_s.x(), -v_s.y(), -v_s.z());
+}
+
+// Gyro-only fix: flip yaw sign (Z) after z-down body mapping
+static inline Vector3f sensorToBodyZDown_GyroFix(const Vector3f& w_s) {
+  Vector3f w_b = sensorToBodyZDown(w_s); // (x, -y, -z)
+  w_b.z() = -w_b.z();                    // <-- flip only Z (yaw)
+  return w_b;
 }
 
 // ------------------------------------------------------------
@@ -401,7 +408,7 @@ void setup() {
       float gx, gy, gz;
       IMU.readGyroscope(gx, gy, gz); // deg/s
       Vector3f w_s(gx, gy, gz);
-      Vector3f w_b_deg = sensorToBodyZDown(w_s);
+      Vector3f w_b_deg = sensorToBodyZDown_GyroFix(w_s);
       sum += w_b_deg;
       got++;
     }
@@ -454,7 +461,7 @@ void loop() {
 
   // Gyro: sensor -> body, deg/s -> rad/s, subtract bias
   Vector3f w_s(gx, gy, gz);
-  Vector3f w_b = sensorToBodyZDown(w_s) * (float)(M_PI / 180.0f);
+  Vector3f w_b = sensorToBodyZDown_GyroFix(w_s) * (float)(M_PI / 180.0f);
   w_b -= gyro_bias_b;
 
   // -----------------------------
