@@ -13,9 +13,11 @@ This repository contains implementations, notes, and experiments related to:
 * Sensor Fusion Concepts
 
 
-## 🎥 Conceptual Walkthrough Video (Attitude Estimation, Assignment 3)
+## 🎥 (Attitude Estimation, Assignment 3)
 
-<iframe width="560" height="315" src="https://www.youtube.com/embed/Ph4t6_ZBUpA?si=_0bZ-6PaPRRs3xib" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>
+[![Watch on YouTube](https://img.youtube.com/vi/Ph4t6_ZBUpA/hqdefault.jpg)](https://youtu.be/Ph4t6_ZBUpA)
+
+➡️ https://youtu.be/Ph4t6_ZBUpA
 
 ---
 
